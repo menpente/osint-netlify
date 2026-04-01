@@ -1,11 +1,23 @@
 import { useState, useRef, useCallback } from "react";
 
+// ── Network options ───────────────────────────────────────────────────────────
+const NETWORKS = [
+  { id: "linkedin",      label: "LinkedIn" },
+  { id: "github",        label: "GitHub" },
+  { id: "twitter",       label: "Twitter/X" },
+  { id: "instagram",     label: "Instagram" },
+  { id: "facebook",      label: "Facebook" },
+  { id: "researchgate",  label: "ResearchGate" },
+  { id: "medium",        label: "Medium" },
+  { id: "stackoverflow", label: "Stack Overflow" },
+];
+
 // ── API call ──────────────────────────────────────────────────────────────────
-async function enrichContact({ name, email }) {
+async function enrichContact({ name, email }, networks) {
   const res = await fetch("/api/enrich", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify({ name: name || null, email: email || null }),
+    body:    JSON.stringify({ name: name || null, email: email || null, networks }),
   });
   const data = await res.json();
   if (data.error && !data.match_notes) throw new Error(data.error);
@@ -36,7 +48,7 @@ function parseContacts(text) {
 // ── Export CSV ────────────────────────────────────────────────────────────────
 function exportCSV(results) {
   const headers = ["name","email","resolved_name","industry","role","country",
-                   "education_level","interests","confidence","sources","match_notes"];
+                   "education_level","interests","confidence","sources","profile_urls","match_notes"];
   const rows = results.map(r =>
     headers.map(h => {
       const v = r[h];
@@ -155,6 +167,23 @@ function ResultRow({ row, idx }) {
             )}
           </div>
         </td>
+        {/* Sources */}
+        <td style={{ padding:"10px 8px" }}>
+          <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+            {(row.sources||[]).slice(0,3).map((s, i) => {
+              const url = (row.profile_urls||[])[i];
+              const tag = <Tag key={s} label={s} color={C.sky} />;
+              return url
+                ? <a key={s} href={url} target="_blank" rel="noopener noreferrer"
+                     onClick={e => e.stopPropagation()}
+                     style={{ textDecoration:"none" }}>{tag}</a>
+                : tag;
+            })}
+            {(row.sources||[]).length > 3 && (
+              <Tag label={`+${row.sources.length-3}`} color={C.muted} />
+            )}
+          </div>
+        </td>
         {/* Confidence */}
         <td style={{ padding:"10px 14px", textAlign:"right" }}>
           {row.error
@@ -167,12 +196,8 @@ function ResultRow({ row, idx }) {
       </tr>
       {open && (
         <tr style={{ background: C.border }}>
-          <td colSpan={7} style={{ padding:"10px 14px" }}>
+          <td colSpan={8} style={{ padding:"10px 14px" }}>
             <div style={{ display:"flex", gap:24, flexWrap:"wrap", fontSize:12 }}>
-              <div>
-                <span style={{ color: C.dim, textTransform:"uppercase", letterSpacing:1 }}>Sources </span>
-                <span style={{ color: C.mid }}>{(row.sources||[]).join(", ")||"none"}</span>
-              </div>
               <div>
                 <span style={{ color: C.dim, textTransform:"uppercase", letterSpacing:1 }}>All interests </span>
                 <span style={{ color: C.mid }}>{(row.interests||[]).join(", ")||"—"}</span>
@@ -199,15 +224,21 @@ const FORMATS = [
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [contacts,    setContacts]    = useState([]);
-  const [results,     setResults]     = useState([]);
-  const [processing,  setProcessing]  = useState(false);
-  const [done,        setDone]        = useState(0);
-  const [dragOver,    setDragOver]    = useState(false);
-  const [fileName,    setFileName]    = useState(null);
-  const [showFormats, setShowFormats] = useState(false);
-  const [globalError, setGlobalError] = useState(null);
+  const [contacts,         setContacts]         = useState([]);
+  const [results,          setResults]          = useState([]);
+  const [processing,       setProcessing]       = useState(false);
+  const [done,             setDone]             = useState(0);
+  const [dragOver,         setDragOver]         = useState(false);
+  const [fileName,         setFileName]         = useState(null);
+  const [showFormats,      setShowFormats]      = useState(false);
+  const [globalError,      setGlobalError]      = useState(null);
+  const [selectedNetworks, setSelectedNetworks] = useState(["linkedin"]);
   const fileRef = useRef();
+
+  const toggleNetwork = (id) =>
+    setSelectedNetworks(prev =>
+      prev.includes(id) ? prev.filter(n => n !== id) : [...prev, id]
+    );
 
   const parseFile = useCallback((file) => {
     setFileName(file.name);
@@ -230,7 +261,7 @@ export default function App() {
     setProcessing(true); setResults([]); setDone(0); setGlobalError(null);
     for (let i = 0; i < contacts.length; i++) {
       try {
-        const row = await enrichContact(contacts[i]);
+        const row = await enrichContact(contacts[i], selectedNetworks);
         setResults(prev => [...prev, row]);
       } catch (err) {
         if (err.message.includes("API_KEY")) {
@@ -360,6 +391,33 @@ export default function App() {
           )}
         </div>
 
+        {/* ── Network selector ── */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: C.dim, textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 8 }}>
+            Search on
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {NETWORKS.map(n => {
+              const active = selectedNetworks.includes(n.id);
+              return (
+                <button
+                  key={n.id}
+                  onClick={() => toggleNetwork(n.id)}
+                  style={{
+                    background: active ? C.purple + "22" : "transparent",
+                    border: `1px solid ${active ? C.purple : C.muted}`,
+                    color: active ? "#a5b4fc" : C.dim,
+                    borderRadius: 6, padding: "4px 12px",
+                    fontSize: 12, cursor: "pointer", transition: "all 0.15s",
+                  }}
+                >
+                  {n.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* ── Global error ── */}
         {globalError && (
           <div style={{
@@ -426,7 +484,7 @@ export default function App() {
               <table style={{ width:"100%", borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ background: C.surface, borderBottom:`2px solid ${C.border}` }}>
-                    {["Contact","Industry","Role","Location","Education","Interests","Conf."].map(h => (
+                    {["Contact","Industry","Role","Location","Education","Interests","Sources","Conf."].map(h => (
                       <th key={h} style={{
                         padding:"10px 14px", textAlign:"left",
                         fontSize:10, textTransform:"uppercase", letterSpacing:1.2,
@@ -439,7 +497,7 @@ export default function App() {
                   {results.map((row, i) => <ResultRow key={i} row={row} idx={i} />)}
                   {processing && (
                     <tr style={{ background: C.surface }}>
-                      <td colSpan={7} style={{ padding:14, textAlign:"center", color: C.muted, fontSize:13 }}>
+                      <td colSpan={8} style={{ padding:14, textAlign:"center", color: C.muted, fontSize:13 }}>
                         ⏳ Processing {contacts[done]?.name || contacts[done]?.email || "…"}
                       </td>
                     </tr>

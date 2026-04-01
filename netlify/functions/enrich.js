@@ -32,6 +32,7 @@ FINAL OUTPUT — return a single valid JSON object, no markdown fences, no expla
   "interests":        array of up to 5 from ["ai","data-science","legal-writing","translation","education-tech","writing","devops","design","finance","open-source"] or [],
   "confidence":       float 0.0-1.0,
   "sources":          array of platform names e.g. ["linkedin","github"],
+  "profile_urls":     array of direct profile URLs in the same order as "sources" e.g. ["https://linkedin.com/in/johndoe","https://github.com/johndoe"] — use the exact URLs returned by web_search, empty array if none found,
   "match_notes":      one-sentence summary of what was found or "No public profile found"
 }`;
 
@@ -58,14 +59,18 @@ async function braveSearch(query, apiKey) {
 }
 
 // ── Groq agentic loop ─────────────────────────────────────────────────────────
-async function runGroqLoop(name, email, groqKey, braveKey) {
+async function runGroqLoop(name, email, groqKey, braveKey, networks) {
   const userContent = [
     name  && `Full name: ${name}`,
     email && `Email: ${email}`,
   ].filter(Boolean).join("\n");
 
+  const networkRestriction = networks && networks.length > 0
+    ? `\n\nRESTRICTION: Only search on these platforms: ${networks.join(", ")}. Do not use other social networks.`
+    : "";
+
   const messages = [
-    { role: "system",  content: SYSTEM_PROMPT },
+    { role: "system",  content: SYSTEM_PROMPT + networkRestriction },
     { role: "user",    content: `Enrich this contact:\n${userContent}` },
   ];
 
@@ -164,9 +169,9 @@ export const handler = async (event) => {
   if (!groqKey)  return { statusCode: 500, body: JSON.stringify({ error: "GROQ_API_KEY not set" }) };
   if (!braveKey) return { statusCode: 500, body: JSON.stringify({ error: "BRAVE_SEARCH_API_KEY not set" }) };
 
-  let name, email;
+  let name, email, networks;
   try {
-    ({ name, email } = JSON.parse(event.body));
+    ({ name, email, networks } = JSON.parse(event.body));
   } catch {
     return { statusCode: 400, body: JSON.stringify({ error: "Invalid JSON body" }) };
   }
@@ -176,7 +181,7 @@ export const handler = async (event) => {
   }
 
   try {
-    const raw = await runGroqLoop(name, email, groqKey, braveKey);
+    const raw = await runGroqLoop(name, email, groqKey, braveKey, networks);
     // Strip any accidental markdown fences
     const clean = raw.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
     const result = JSON.parse(clean);
