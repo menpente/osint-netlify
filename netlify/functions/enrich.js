@@ -3,7 +3,7 @@
 // returns enriched demographic JSON.
 
 const GROQ_API_URL  = "https://api.groq.com/openai/v1/chat/completions";
-const BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search";
+const GOOGLE_CSE_URL = "https://www.googleapis.com/customsearch/v1";
 const MODEL         = "llama-3.3-70b-versatile";
 const MAX_TOOL_ROUNDS = 4;   // max search rounds before forcing final answer
 
@@ -36,30 +36,24 @@ FINAL OUTPUT — return a single valid JSON object, no markdown fences, no expla
   "match_notes":      one-sentence summary of what was found or "No public profile found"
 }`;
 
-// ── Brave Search ──────────────────────────────────────────────────────────────
-async function braveSearch(query, apiKey) {
-  const url = `${BRAVE_API_URL}?q=${encodeURIComponent(query)}&count=5&search_lang=en`;
-  const res = await fetch(url, {
-    headers: {
-      "Accept": "application/json",
-      "Accept-Encoding": "gzip",
-      "X-Subscription-Token": apiKey,
-    },
-  });
-  if (!res.ok) throw new Error(`Brave Search error ${res.status}`);
+// ── Google Custom Search ──────────────────────────────────────────────────────
+async function googleSearch(query, apiKey, cseId) {
+  const url = `${GOOGLE_CSE_URL}?key=${apiKey}&cx=${cseId}&q=${encodeURIComponent(query)}&num=5`;
+  const res = await fetch(url, { headers: { "Accept": "application/json" } });
+  if (!res.ok) throw new Error(`Google Search error ${res.status}`);
   const data = await res.json();
 
   // Return a compact digest so it fits in the context window
-  const results = (data.web?.results || []).slice(0, 5).map(r => ({
+  const results = (data.items || []).slice(0, 5).map(r => ({
     title:       r.title,
-    url:         r.url,
-    description: r.description?.slice(0, 300),
+    url:         r.link,
+    description: r.snippet?.slice(0, 300),
   }));
   return JSON.stringify(results);
 }
 
 // ── Groq agentic loop ─────────────────────────────────────────────────────────
-async function runGroqLoop(name, email, groqKey, braveKey, networks) {
+async function runGroqLoop(name, email, groqKey, googleKey, googleCse, networks) {
   const userContent = [
     name  && `Full name: ${name}`,
     email && `Email: ${email}`,
@@ -120,7 +114,7 @@ async function runGroqLoop(name, email, groqKey, braveKey, networks) {
       const { query } = JSON.parse(call.function.arguments);
       let searchResult;
       try {
-        searchResult = await braveSearch(query, braveKey);
+        searchResult = await googleSearch(query, googleKey, googleCse);
       } catch (e) {
         searchResult = JSON.stringify({ error: e.message });
       }
@@ -163,11 +157,13 @@ export const handler = async (event) => {
     return { statusCode: 405, body: "Method Not Allowed" };
   }
 
-  const groqKey  = process.env.GROQ_API_KEY;
-  const braveKey = process.env.BRAVE_SEARCH_API_KEY;
+  const groqKey   = process.env.GROQ_API_KEY;
+  const googleKey = process.env.GOOGLE_API_KEY;
+  const googleCse = process.env.GOOGLE_CSE_ID;
 
-  if (!groqKey)  return { statusCode: 500, body: JSON.stringify({ error: "GROQ_API_KEY not set" }) };
-  if (!braveKey) return { statusCode: 500, body: JSON.stringify({ error: "BRAVE_SEARCH_API_KEY not set" }) };
+  if (!groqKey)   return { statusCode: 500, body: JSON.stringify({ error: "GROQ_API_KEY not set" }) };
+  if (!googleKey) return { statusCode: 500, body: JSON.stringify({ error: "GOOGLE_API_KEY not set" }) };
+  if (!googleCse) return { statusCode: 500, body: JSON.stringify({ error: "GOOGLE_CSE_ID not set" }) };
 
   let name, email, networks;
   try {
@@ -181,9 +177,13 @@ export const handler = async (event) => {
   }
 
   try {
-    const raw = await runGroqLoop(name, email, groqKey, braveKey, networks);
-    // Strip any accidental markdown fences
-    const clean = raw.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+    const raw = await runGroqLoop(name, email, groqKey, googleKey, googleCse, networks);
+    // Strip markdown fences, then fall back to extracting first {...} block
+    let clean = raw.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+    if (!clean.startsWith("{")) {
+      const match = clean.match(/\{[\s\S]*\}/);
+      if (match) clean = match[0];
+    }
     const result = JSON.parse(clean);
     return {
       statusCode: 200,
