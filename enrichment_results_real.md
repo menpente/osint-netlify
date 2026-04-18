@@ -1,6 +1,6 @@
 # OSINT Enrichment Results (Real API)
 
-**Generated**: 2026-04-18T20:05:28.089Z
+**Generated**: 2026-04-18T21:33:55.207Z
 **Source**: alumnos.txt (Spanish translation professionals contact list)
 **Method**: Groq LLM + Serper.dev web search with company inference from email domain
 **Contacts**: 289 enriched
