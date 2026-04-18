@@ -302,7 +302,7 @@ export default function App() {
             OSINT Demographics Enricher
           </div>
           <div style={{ fontSize:12, color: C.dim }}>
-            Powered by Groq + Brave Search · Name · Email · or both
+            Powered by Groq + Serper · Name · Email · or both
           </div>
         </div>
         {results.length > 0 && !processing && (

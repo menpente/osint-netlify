@@ -2,9 +2,9 @@
 // Serverless function: receives {name, email}, runs Groq with web_search tool,
 // returns enriched demographic JSON.
 
-const GROQ_API_URL  = "https://api.groq.com/openai/v1/chat/completions";
-const GOOGLE_CSE_URL = "https://www.googleapis.com/customsearch/v1";
-const MODEL         = "llama-3.3-70b-versatile";
+const GROQ_API_URL   = "https://api.groq.com/openai/v1/chat/completions";
+const SERPER_API_URL = "https://google.serper.dev/search";
+const MODEL          = "llama-3.3-70b-versatile";
 const MAX_TOOL_ROUNDS = 4;   // max search rounds before forcing final answer
 
 const SYSTEM_PROMPT = `You are an OSINT demographic enrichment engine. Given a person's name and/or email, your job is to find their PUBLIC professional profile and return structured demographic tags.
@@ -36,15 +36,18 @@ FINAL OUTPUT — return a single valid JSON object, no markdown fences, no expla
   "match_notes":      one-sentence summary of what was found or "No public profile found"
 }`;
 
-// ── Google Custom Search ──────────────────────────────────────────────────────
-async function googleSearch(query, apiKey, cseId) {
-  const url = `${GOOGLE_CSE_URL}?key=${apiKey}&cx=${cseId}&q=${encodeURIComponent(query)}&num=5`;
-  const res = await fetch(url, { headers: { "Accept": "application/json" } });
-  if (!res.ok) throw new Error(`Google Search error ${res.status}`);
+// ── Serper.dev Search ─────────────────────────────────────────────────────────
+async function serperSearch(query, apiKey) {
+  const res = await fetch(SERPER_API_URL, {
+    method:  "POST",
+    headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
+    body:    JSON.stringify({ q: query, num: 5 }),
+  });
+  if (!res.ok) throw new Error(`Serper error ${res.status}`);
   const data = await res.json();
 
   // Return a compact digest so it fits in the context window
-  const results = (data.items || []).slice(0, 5).map(r => ({
+  const results = (data.organic || []).slice(0, 5).map(r => ({
     title:       r.title,
     url:         r.link,
     description: r.snippet?.slice(0, 300),
@@ -53,7 +56,7 @@ async function googleSearch(query, apiKey, cseId) {
 }
 
 // ── Groq agentic loop ─────────────────────────────────────────────────────────
-async function runGroqLoop(name, email, groqKey, googleKey, googleCse, networks) {
+async function runGroqLoop(name, email, groqKey, serperKey, networks) {
   const userContent = [
     name  && `Full name: ${name}`,
     email && `Email: ${email}`,
@@ -114,7 +117,7 @@ async function runGroqLoop(name, email, groqKey, googleKey, googleCse, networks)
       const { query } = JSON.parse(call.function.arguments);
       let searchResult;
       try {
-        searchResult = await googleSearch(query, googleKey, googleCse);
+        searchResult = await serperSearch(query, serperKey);
       } catch (e) {
         searchResult = JSON.stringify({ error: e.message });
       }
@@ -158,12 +161,10 @@ export const handler = async (event) => {
   }
 
   const groqKey   = process.env.GROQ_API_KEY;
-  const googleKey = process.env.GOOGLE_API_KEY;
-  const googleCse = process.env.GOOGLE_CSE_ID;
+  const serperKey = process.env.SERPER_API_KEY;
 
   if (!groqKey)   return { statusCode: 500, body: JSON.stringify({ error: "GROQ_API_KEY not set" }) };
-  if (!googleKey) return { statusCode: 500, body: JSON.stringify({ error: "GOOGLE_API_KEY not set" }) };
-  if (!googleCse) return { statusCode: 500, body: JSON.stringify({ error: "GOOGLE_CSE_ID not set" }) };
+  if (!serperKey) return { statusCode: 500, body: JSON.stringify({ error: "SERPER_API_KEY not set" }) };
 
   let name, email, networks;
   try {
@@ -177,7 +178,7 @@ export const handler = async (event) => {
   }
 
   try {
-    const raw = await runGroqLoop(name, email, groqKey, googleKey, googleCse, networks);
+    const raw = await runGroqLoop(name, email, groqKey, serperKey, networks);
     // Strip markdown fences, then fall back to extracting first {...} block
     let clean = raw.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
     if (!clean.startsWith("{")) {
