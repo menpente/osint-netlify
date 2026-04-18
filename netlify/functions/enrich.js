@@ -7,15 +7,35 @@ const SERPER_API_URL = "https://google.serper.dev/search";
 const MODEL          = "llama-3.3-70b-versatile";
 const MAX_TOOL_ROUNDS = 4;   // max search rounds before forcing final answer
 
-const SYSTEM_PROMPT = `You are an OSINT demographic enrichment engine. Given a person's name and/or email, your job is to find their PUBLIC professional profile and return structured demographic tags.
+// Generic email providers — never infer company from these domains
+const GENERIC_DOMAINS = new Set([
+  "gmail.com","yahoo.com","hotmail.com","outlook.com","icloud.com",
+  "protonmail.com","live.com","me.com","aol.com","mail.com",
+  "gmx.com","zoho.com","yandex.com","tutanota.com","yahoo.es",
+  "hotmail.es","msn.com","googlemail.com",
+]);
+
+const SYSTEM_PROMPT = `You are an OSINT demographic enrichment engine. Given a person's name and/or email, find their PUBLIC professional profile and return structured demographic tags.
 
 PROCESS:
-1. Build targeted search queries using the name and/or email handle provided.
-   - If both name and email: search by full name first, then try the email local part as a username.
-   - If name only: search LinkedIn, GitHub, Twitter/X by full name.
-   - If email only: use the local part (before @) as a potential username handle.
-2. Use the web_search tool to run those queries (2-4 searches max).
-3. From ONLY publicly available results, infer demographic tags.
+1. COMPANY INFERENCE (when email is provided):
+   - Extract the domain (part after @).
+   - If it is a generic provider (gmail.com, yahoo.com, hotmail.com, outlook.com, icloud.com, protonmail.com, live.com, me.com, aol.com, mail.com, gmx.com, zoho.com, yandex.com, tutanota.com, yahoo.es, hotmail.es) → company = null, company_source = "not_found".
+   - Otherwise → search: "{domain} company LinkedIn" to find the official company name. Set company_source = "domain_lookup".
+
+2. BUILD PRECISION QUERIES — name + company is far more precise than name alone:
+   - If company is known: first try  site:linkedin.com/in "{name}" "{company}"
+   - If company is known: fallback   "{name}" "{company}" linkedin
+   - If no company:                  site:linkedin.com/in "{name}"
+   - Always also try:                site:github.com "{email_local_part}" OR "{name}"
+   - Run 2–4 searches total, stop when a confident match is found.
+
+3. EXTRACT from ONLY publicly visible results:
+   - Exact current job title string (e.g. "Senior Data Scientist at Stripe")
+   - Seniority level inferred from title
+   - Industry, country/location
+   - Education: degree type + field of study + institution, most recent first
+   - Up to 5 interest/skill tags
 
 ETHICAL RULES (non-negotiable):
 - Only use publicly visible profile data.
@@ -25,14 +45,18 @@ ETHICAL RULES (non-negotiable):
 FINAL OUTPUT — return a single valid JSON object, no markdown fences, no explanation:
 {
   "resolved_name":    string or null,
+  "company":          string or null,
+  "company_source":   "provided"|"domain_lookup"|"not_found",
+  "current_role":     string or null,
   "industry":         "legal"|"tech"|"education"|"translation"|"healthcare"|"finance"|"marketing"|"freelance"|"other" or null,
-  "role":             "junior"|"mid"|"senior"|"lead"|"manager"|"executive"|"freelancer"|"student"|"unknown" or null,
+  "seniority":        "junior"|"mid"|"senior"|"lead"|"manager"|"executive"|"freelancer"|"student"|"unknown" or null,
   "country":          string or null,
-  "education_level":  "bachelor"|"master"|"phd"|"bootcamp"|"self-taught"|"technical"|"unknown" or null,
+  "education":        array of { "degree": "bachelor"|"master"|"phd"|"bootcamp"|"self-taught"|"technical"|null, "field": string or null, "institution": string or null } — most recent first, [] if none found,
   "interests":        array of up to 5 from ["ai","data-science","legal-writing","translation","education-tech","writing","devops","design","finance","open-source"] or [],
   "confidence":       float 0.0-1.0,
+  "needs_review":     boolean — true if confidence < 0.3, name is ambiguous, or no profile found,
   "sources":          array of platform names e.g. ["linkedin","github"],
-  "profile_urls":     array of direct profile URLs in the same order as "sources" e.g. ["https://linkedin.com/in/johndoe","https://github.com/johndoe"] — use the exact URLs returned by web_search, empty array if none found,
+  "profile_urls":     array of direct profile URLs in the same order as "sources" — use exact URLs from web_search, [] if none found,
   "match_notes":      one-sentence summary of what was found or "No public profile found"
 }`;
 
@@ -57,10 +81,19 @@ async function serperSearch(query, apiKey) {
 
 // ── Groq agentic loop ─────────────────────────────────────────────────────────
 async function runGroqLoop(name, email, groqKey, serperKey, networks) {
+  // Pre-compute company hint from email domain so the LLM starts with context
+  let companyHint = "";
+  if (email) {
+    const domain = email.split("@")[1]?.toLowerCase();
+    if (domain && !GENERIC_DOMAINS.has(domain)) {
+      companyHint = `\nEmail domain: ${domain} (likely employer — confirm via search)`;
+    }
+  }
+
   const userContent = [
     name  && `Full name: ${name}`,
     email && `Email: ${email}`,
-  ].filter(Boolean).join("\n");
+  ].filter(Boolean).join("\n") + companyHint;
 
   const networkRestriction = networks && networks.length > 0
     ? `\n\nRESTRICTION: Only search on these platforms: ${networks.join(", ")}. Do not use other social networks.`

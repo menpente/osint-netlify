@@ -47,11 +47,17 @@ function parseContacts(text) {
 
 // ── Export CSV ────────────────────────────────────────────────────────────────
 function exportCSV(results) {
-  const headers = ["name","email","resolved_name","industry","role","country",
-                   "education_level","interests","confidence","sources","profile_urls","match_notes"];
+  const headers = ["name","email","resolved_name","company","company_source",
+                   "current_role","industry","seniority","country",
+                   "education","interests","confidence","needs_review",
+                   "sources","profile_urls","match_notes"];
   const rows = results.map(r =>
     headers.map(h => {
       const v = r[h];
+      if (h === "education") {
+        const edu = Array.isArray(v) ? v : [];
+        return `"${edu.map(e => [e.degree,e.field,e.institution].filter(Boolean).join(":")).join(";")}"`;
+      }
       return `"${Array.isArray(v) ? v.join(";") : (v ?? "")}"`;
     }).join(",")
   );
@@ -81,11 +87,12 @@ const C = {
 };
 
 const BADGE = {
-  industry:        C.purple,
-  role:            C.pink,
-  country:         C.sky,
-  education_level: C.amber,
-  interests:       C.teal,
+  industry:    C.purple,
+  seniority:   C.pink,
+  country:     C.sky,
+  education:   C.amber,
+  interests:   C.teal,
+  company:     "#7c3aed",
 };
 
 const confColor = c => c >= 0.75 ? C.green : c >= 0.4 ? C.amber : C.red;
@@ -123,6 +130,11 @@ function ProgressBar({ value, total }) {
 function ResultRow({ row, idx }) {
   const [open, setOpen] = useState(false);
   const bg = idx % 2 === 0 ? C.bg : "#0b1320";
+  const topEdu = Array.isArray(row.education) ? row.education[0] : null;
+  const eduLabel = topEdu
+    ? [topEdu.degree, topEdu.field].filter(Boolean).join(" · ") || topEdu.degree
+    : null;
+
   return (
     <>
       <tr
@@ -135,20 +147,37 @@ function ResultRow({ row, idx }) {
         <td style={{ padding:"10px 14px" }}>
           <div style={{ fontSize:13, color: C.text, fontWeight:500 }}>
             {row.resolved_name || row.name || "—"}
+            {row.needs_review && (
+              <span title="Needs review — low confidence or ambiguous match"
+                style={{ marginLeft:6, fontSize:10, color: C.amber }}>⚑</span>
+            )}
           </div>
           {row.email && (
             <div style={{ fontSize:11, color: C.dim, fontFamily:"monospace", marginTop:1 }}>
               {row.email}
             </div>
           )}
+          {row.company && (
+            <div style={{ fontSize:11, color: "#a78bfa", marginTop:2 }}>
+              {row.company}
+              {row.company_source === "domain_lookup" && (
+                <span title="Inferred from email domain" style={{ marginLeft:4, opacity:0.6 }}>·</span>
+              )}
+            </div>
+          )}
+        </td>
+        {/* Role */}
+        <td style={{ padding:"10px 8px", maxWidth:180 }}>
+          {row.current_role && (
+            <div style={{ fontSize:12, color: C.text, marginBottom:3, lineHeight:1.3 }}>
+              {row.current_role}
+            </div>
+          )}
+          {row.seniority && <Tag label={row.seniority} color={BADGE.seniority} />}
         </td>
         {/* Industry */}
         <td style={{ padding:"10px 8px" }}>
           {row.industry && <Tag label={row.industry} color={BADGE.industry} />}
-        </td>
-        {/* Role */}
-        <td style={{ padding:"10px 8px" }}>
-          {row.role && <Tag label={row.role} color={BADGE.role} />}
         </td>
         {/* Location */}
         <td style={{ padding:"10px 8px", fontSize:12, color: C.mid }}>
@@ -156,7 +185,7 @@ function ResultRow({ row, idx }) {
         </td>
         {/* Education */}
         <td style={{ padding:"10px 8px" }}>
-          {row.education_level && <Tag label={row.education_level} color={BADGE.education_level} />}
+          {eduLabel && <Tag label={eduLabel} color={BADGE.education} />}
         </td>
         {/* Interests */}
         <td style={{ padding:"10px 8px" }}>
@@ -198,8 +227,18 @@ function ResultRow({ row, idx }) {
         <tr style={{ background: C.border }}>
           <td colSpan={8} style={{ padding:"10px 14px" }}>
             <div style={{ display:"flex", gap:24, flexWrap:"wrap", fontSize:12 }}>
+              {(row.education||[]).length > 0 && (
+                <div>
+                  <span style={{ color: C.dim, textTransform:"uppercase", letterSpacing:1 }}>Education </span>
+                  {(row.education||[]).map((e, i) => (
+                    <span key={i} style={{ color: C.mid, marginRight:12 }}>
+                      {[e.degree, e.field, e.institution].filter(Boolean).join(" · ")}
+                    </span>
+                  ))}
+                </div>
+              )}
               <div>
-                <span style={{ color: C.dim, textTransform:"uppercase", letterSpacing:1 }}>All interests </span>
+                <span style={{ color: C.dim, textTransform:"uppercase", letterSpacing:1 }}>Interests </span>
                 <span style={{ color: C.mid }}>{(row.interests||[]).join(", ")||"—"}</span>
               </div>
               <div style={{ flex:1 }}>
@@ -484,7 +523,7 @@ export default function App() {
               <table style={{ width:"100%", borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ background: C.surface, borderBottom:`2px solid ${C.border}` }}>
-                    {["Contact","Industry","Role","Location","Education","Interests","Sources","Conf."].map(h => (
+                    {["Contact","Role","Industry","Location","Education","Interests","Sources","Conf."].map(h => (
                       <th key={h} style={{
                         padding:"10px 14px", textAlign:"left",
                         fontSize:10, textTransform:"uppercase", letterSpacing:1.2,
