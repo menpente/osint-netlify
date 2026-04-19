@@ -15,6 +15,158 @@ const GENERIC_DOMAINS = new Set([
   "hotmail.es","msn.com","googlemail.com",
 ]);
 
+// ── Company inference from email domain ───────────────────────────────────────
+function inferCompany(email) {
+  if (!email?.includes("@")) return null;
+  const domain = email.split("@")[1]?.toLowerCase();
+  if (!domain || GENERIC_DOMAINS.has(domain)) return null;
+  return domain;
+}
+
+// ── Serper.dev Search — raw (returns parsed objects) ─────────────────────────
+async function serperSearchRaw(query, apiKey, { gl, hl, num = 5 } = {}) {
+  const body = { q: query, num };
+  if (gl) body.gl = gl;
+  if (hl) body.hl = hl;
+
+  const res = await fetch(SERPER_API_URL, {
+    method:  "POST",
+    headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
+    body:    JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Serper error ${res.status}`);
+  const data = await res.json();
+  return (data.organic || []).slice(0, num).map(r => ({
+    url:         r.link?.split("?")[0] || "",
+    title:       r.title  || "",
+    description: r.snippet || "",
+  }));
+}
+
+// ── Serper.dev Search — compact JSON string for Groq tool calls ───────────────
+async function serperSearch(query, apiKey) {
+  const results = await serperSearchRaw(query, apiKey);
+  return JSON.stringify(results.map(r => ({
+    title:       r.title,
+    url:         r.url,
+    description: r.description.slice(0, 300),
+  })));
+}
+
+// ── Heuristic enrichment (no LLM) ────────────────────────────────────────────
+function heuristicResult(name, email, linkedinUrl, snippet) {
+  const companyDomain = inferCompany(email);
+  const allText = `${snippet}`.toLowerCase();
+
+  // Industry
+  const industry =
+    /translat|traductor|interpret|localiz|linguist/i.test(allText) ? "translation" :
+    /legal|lawyer|attorney|abogad|notari/i.test(allText)           ? "legal"       :
+    /engineer|developer|data|software|analyst|devops/i.test(allText) ? "tech"      :
+    /teacher|professor|instructor|educati|docent/i.test(allText)   ? "education"   :
+    /market|content|social media|copywrite/i.test(allText)         ? "marketing"   :
+    /account|financ|auditor|cfo|controller/i.test(allText)         ? "finance"     :
+    "other";
+
+  // Seniority
+  const seniority =
+    /senior|lead|head|director|chief|principal|manager|founder/i.test(allText) ? "senior"     :
+    /junior|intern|trainee|assistant/i.test(allText)                            ? "junior"     :
+    /freelance|freelancer|autónomo|self.employed/i.test(allText)                ? "freelancer" :
+    "mid";
+
+  // Company — prefer snippet extraction over raw domain
+  let company = null, company_source = "not_found";
+  const snippetMatch = snippet.match(/[-·|]\s*([A-Z][^·|\n]{3,50})/);
+  if (snippetMatch) {
+    company = snippetMatch[1].trim().replace(/\s*-\s*LinkedIn.*$/i, "").trim();
+    company_source = "snippet";
+  } else if (companyDomain) {
+    company = companyDomain
+      .replace(/\.(com|es|io|org|net|co)$/, "")
+      .split(".")[0]
+      .replace(/[-_]/g, " ")
+      .replace(/\b\w/g, c => c.toUpperCase());
+    company_source = "domain_lookup";
+  }
+
+  // Interests from keyword map
+  const interestMap = {
+    "ai": "ai", "machine": "ai", "translation": "translation", "language": "translation",
+    "data": "data-science", "design": "design", "finance": "finance",
+    "devops": "devops", "open": "open-source", "writing": "writing",
+    "education": "education-tech", "legal": "legal-writing",
+  };
+  const interests = new Set();
+  for (const [kw, tag] of Object.entries(interestMap)) {
+    if (allText.includes(kw)) interests.add(tag);
+  }
+
+  // Role — first segment of snippet before separator
+  const roleMatch = snippet.match(/^([^·\-|\n]{5,100})/);
+  const current_role = roleMatch
+    ? roleMatch[1].trim().replace(/^(LinkedIn\s*[-·]?\s*)/i, "").slice(0, 120) || null
+    : null;
+
+  const confidence = linkedinUrl ? 0.72 : (companyDomain ? 0.40 : 0.15);
+
+  return {
+    resolved_name:  name,
+    company:        company || null,
+    company_source,
+    current_role:   current_role || null,
+    industry,
+    seniority,
+    country:        null,
+    education:      [],
+    interests:      [...interests].slice(0, 5),
+    confidence,
+    needs_review:   confidence < 0.5,
+    sources:        linkedinUrl ? ["linkedin"] : [],
+    profile_urls:   linkedinUrl ? [linkedinUrl] : [],
+    match_notes:    linkedinUrl
+      ? `LinkedIn found via search: ${snippet.slice(0, 100)}`
+      : (companyDomain
+          ? `No LinkedIn match; company inferred from domain ${companyDomain}`
+          : "No public profile found"),
+  };
+}
+
+// ── Fast path: Serper → LinkedIn URL → heuristic result ──────────────────────
+// Returns an enriched object if a confident LinkedIn match is found, else null.
+async function fastPathEnrich(name, email, serperKey) {
+  if (!name) return null;
+
+  const companyDomain = inferCompany(email);
+  const query = companyDomain
+    ? `site:linkedin.com/in "${name}" "${companyDomain}"`
+    : `site:linkedin.com/in "${name}"`;
+
+  let results;
+  try {
+    results = await serperSearchRaw(query, serperKey, { gl: "es", hl: "es", num: 5 });
+  } catch {
+    return null; // let Groq handle it
+  }
+
+  const linkedinHits = results.filter(r => r.url.includes("linkedin.com/in/"));
+  if (linkedinHits.length === 0) return null;
+
+  // Validate: require ≥2 name words (>3 chars) to appear in snippet+title
+  const nameWords = name.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+  const minMatch  = Math.min(2, nameWords.length);
+
+  const best = linkedinHits.find(r => {
+    const text = `${r.title} ${r.description}`.toLowerCase();
+    return nameWords.filter(w => text.includes(w)).length >= minMatch;
+  });
+
+  if (!best) return null;
+
+  const snippet = `${best.title} ${best.description}`;
+  return heuristicResult(name, email, best.url, snippet);
+}
+
 const SYSTEM_PROMPT = `You are an OSINT demographic enrichment engine. Given a person's name and/or email, find their PUBLIC professional profile and return structured demographic tags.
 
 PROCESS:
@@ -59,25 +211,6 @@ FINAL OUTPUT — return a single valid JSON object, no markdown fences, no expla
   "profile_urls":     array of direct profile URLs in the same order as "sources" — use exact URLs from web_search, [] if none found,
   "match_notes":      one-sentence summary of what was found or "No public profile found"
 }`;
-
-// ── Serper.dev Search ─────────────────────────────────────────────────────────
-async function serperSearch(query, apiKey) {
-  const res = await fetch(SERPER_API_URL, {
-    method:  "POST",
-    headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
-    body:    JSON.stringify({ q: query, num: 5 }),
-  });
-  if (!res.ok) throw new Error(`Serper error ${res.status}`);
-  const data = await res.json();
-
-  // Return a compact digest so it fits in the context window
-  const results = (data.organic || []).slice(0, 5).map(r => ({
-    title:       r.title,
-    url:         r.link,
-    description: r.snippet?.slice(0, 300),
-  }));
-  return JSON.stringify(results);
-}
 
 // ── Groq agentic loop ─────────────────────────────────────────────────────────
 async function runGroqLoop(name, email, groqKey, serperKey, networks) {
@@ -196,7 +329,6 @@ export const handler = async (event) => {
   const groqKey   = process.env.GROQ_API_KEY;
   const serperKey = process.env.SERPER_API_KEY;
 
-  if (!groqKey)   return { statusCode: 500, body: JSON.stringify({ error: "GROQ_API_KEY not set" }) };
   if (!serperKey) return { statusCode: 500, body: JSON.stringify({ error: "SERPER_API_KEY not set" }) };
 
   let name, email, networks;
@@ -210,7 +342,29 @@ export const handler = async (event) => {
     return { statusCode: 400, body: JSON.stringify({ error: "Provide at least name or email" }) };
   }
 
+  const corsHeaders = {
+    "Content-Type":                "application/json",
+    "Access-Control-Allow-Origin": "*",
+  };
+
   try {
+    // ── Fast path: Serper → LinkedIn → heuristic (no Groq) ──────────────────
+    // Skipped when user selects non-LinkedIn networks, since Groq handles those.
+    const wantsLinkedInOnly = !networks || networks.length === 0 || (networks.length === 1 && networks[0] === "linkedin");
+    if (wantsLinkedInOnly) {
+      const fast = await fastPathEnrich(name, email, serperKey);
+      if (fast) {
+        return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ name, email, ...fast }) };
+      }
+    }
+
+    // ── Slow path: Groq agentic loop ─────────────────────────────────────────
+    if (!groqKey) {
+      // No Groq key and fast path found nothing — return a minimal heuristic result
+      const fallback = heuristicResult(name, email, null, "");
+      return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ name, email, ...fallback }) };
+    }
+
     const raw = await runGroqLoop(name, email, groqKey, serperKey, networks);
     // Strip markdown fences, then fall back to extracting first {...} block
     let clean = raw.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
@@ -221,17 +375,14 @@ export const handler = async (event) => {
     const result = JSON.parse(clean);
     return {
       statusCode: 200,
-      headers: {
-        "Content-Type":                "application/json",
-        "Access-Control-Allow-Origin": "*",
-      },
-      body: JSON.stringify({ name, email, ...result }),
+      headers:    corsHeaders,
+      body:       JSON.stringify({ name, email, ...result }),
     };
   } catch (err) {
     return {
       statusCode: 500,
-      headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({
+      headers:    { "Access-Control-Allow-Origin": "*" },
+      body:       JSON.stringify({
         name, email,
         error:        err.message,
         match_notes:  "Enrichment failed",

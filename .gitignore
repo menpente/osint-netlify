@@ -7,3 +7,9 @@ dist/
 .claude/
 sample.txt
 alumnos.txt
+enrichment_results*.json
+enrichment_results*.md
+enrichment_report.md
+contacts.json
+.playwright-mcp/
+deno.lock
